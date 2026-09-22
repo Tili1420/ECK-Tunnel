@@ -1,0 +1,23 @@
+# Build artifacts
+/eck
+/dist/
+/release/
+
+# Go module cache accidentally copied into the project (must live outside it)
+/go/
+
+# Vendored deps are optional to commit; uncomment to keep the repo small.
+# /vendor/
+
+# OS / editor cruft
+.DS_Store
+*.log
+*.swp
+
+# Local planning dashboards — private, never committed
+fix.html
+premium.html
+premium-fa.html
+idea.md
+todo.md
+dist/

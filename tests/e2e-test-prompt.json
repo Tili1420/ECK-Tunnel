@@ -1,0 +1,181 @@
+{
+  "name": "ECK-Tunnel end-to-end test: Iran server, Kharej server, user",
+  "version": "1.1",
+  "time_budget": "Keep the whole run to about 10 minutes: short measurements, no repeated runs unless a case fails.",
+  "report_language": "fa",
+  "role": "You are a test engineer. Build and run an end-to-end test of ECK-Tunnel on ONE Ubuntu 22.04 (or newer) Linux machine as root. Simulate three hosts with Linux network namespaces: an Iran server, a Kharej (abroad) server, and an end user. Run every test case below, collect the evidence each one asks for, and write the final report in Persian (fa). Never touch the host's real network config, real /etc/resolv.conf, real apt sources, or any running pengutunnel/eck service; everything happens inside the namespaces and is removed at the end.",
+
+  "inputs": {
+    "eck_binary": "dist/eck-linux-amd64 from the ECK-Tunnel repo (or build: CGO_ENABLED=0 go build -o eck .)",
+    "source_tree": "the ECK-Tunnel repo root (for scripts/run-tests.sh)",
+    "tools_needed": ["iproute2", "iperf3", "curl", "python3", "coreutils (sha256sum, head, timeout)", "tcpdump", "ncat or socat"]
+  },
+
+  "topology": {
+    "description": "Three namespaces joined by a Linux bridge on the host. The user only ever talks to the Iran server; the Iran server only exposes forwarded ports; the real service runs on the Kharej server.",
+    "bridge": "br-eck (host side, no IP)",
+    "namespaces": {
+      "ns-iran":   { "ip": "10.99.0.1/24", "role": "ECK server (Setup Iran). Listens for the tunnel on 8443, exposes user port 9912 (TCP) and 9913 (UDP)." },
+      "ns-kharej": { "ip": "10.99.0.2/24", "role": "ECK client (Setup Kharej). Dials 10.99.0.1:8443. Runs the real services: HTTP on 127.0.0.1:8080, iperf3 on 127.0.0.1:5201, UDP echo on 127.0.0.1:9000." },
+      "ns-user":   { "ip": "10.99.0.3/24", "role": "End user. Connects ONLY to 10.99.0.1:9912 / 9913." }
+    },
+    "setup_commands": [
+      "ip link add br-eck type bridge && ip link set br-eck up",
+      "for n in iran kharej user; do ip netns add ns-$n; ip link add v-$n type veth peer name v-$n-br; ip link set v-$n netns ns-$n; ip link set v-$n-br master br-eck up; ip -n ns-$n link set lo up; done",
+      "ip -n ns-iran addr add 10.99.0.1/24 dev v-iran && ip -n ns-iran link set v-iran up",
+      "ip -n ns-kharej addr add 10.99.0.2/24 dev v-kharej && ip -n ns-kharej link set v-kharej up",
+      "ip -n ns-user addr add 10.99.0.3/24 dev v-user && ip -n ns-user link set v-user up",
+      "ip netns exec ns-user ping -c1 -W1 10.99.0.1   # must succeed"
+    ],
+    "iran_network_emulation": {
+      "purpose": "Reproduce what was measured on the real Iran route: added latency, some loss, and a per-connection (per-flow) rate cap — the reason a pool of 8 parallel connections helps.",
+      "apply_on": "the Kharej side's egress toward Iran (inside ns-kharej, device v-kharej) and the Iran side's egress (ns-iran, v-iran)",
+      "profiles": {
+        "clean":   "no qdisc changes",
+        "iran":    "tc qdisc replace dev <dev> root netem delay 60ms 10ms loss 1%",
+        "per_flow_cap": "tc qdisc replace dev <dev> root handle 1: netem delay 60ms 10ms loss 0.5% && tc qdisc add dev <dev> parent 1: handle 2: fq maxrate 20mbit   # fq maxrate caps EACH flow at 20 Mbit/s"
+      }
+    }
+  },
+
+  "configs": {
+    "token": "generate once with: head -c 24 /dev/urandom | base64  — use the SAME value on both ends",
+    "iran_server_toml": "[server]\nbind_addr = \"0.0.0.0:8443\"\ntransport = \"stealth\"\ntoken = \"<TOKEN>\"\nports = [\"9912=127.0.0.1:8080\", \"9914=127.0.0.1:5201\", \"9913=127.0.0.1:9000\"]\naccept_udp = true\nheartbeat = 10\nlog_level = \"info\"\n",
+    "kharej_client_toml": "[client]\nremote_addr = \"10.99.0.1:8443\"\ntransport = \"stealth\"\ntoken = \"<TOKEN>\"\nconnection_pool = 8\nretry_interval = 1\nlog_level = \"info\"\n",
+    "run": {
+      "iran":   "ip netns exec ns-iran ./eck -c /tmp/eck-test/iran.toml > /tmp/eck-test/iran.log 2>&1 &",
+      "kharej": "ip netns exec ns-kharej ./eck -c /tmp/eck-test/kharej.toml > /tmp/eck-test/kharej.log 2>&1 &"
+    },
+    "kharej_services": [
+      "ip netns exec ns-kharej python3 -m http.server 8080 --bind 127.0.0.1 --directory /tmp/eck-test/www &",
+      "ip netns exec ns-kharej iperf3 -s -B 127.0.0.1 -p 5201 -D",
+      "ip netns exec ns-kharej socat -T5 UDP-LISTEN:9000,bind=127.0.0.1,fork EXEC:cat &"
+    ],
+    "test_data": "mkdir -p /tmp/eck-test/www && head -c 20M /dev/urandom > /tmp/eck-test/www/blob.bin && sha256sum /tmp/eck-test/www/blob.bin"
+  },
+
+  "test_cases": [
+    {
+      "id": "T01",
+      "title": "Tunnel comes up",
+      "steps": ["Start Iran, then Kharej.", "Wait up to 15 s."],
+      "check": "iran.log and kharej.log show the control channel established; no error lines. `ip netns exec ns-kharej ss -tn dst 10.99.0.1:8443` shows the pooled connections (expect about 8 plus control).",
+      "pass": "tunnel up within 15 s AND at least 8 established connections to 10.99.0.1:8443"
+    },
+    {
+      "id": "T02",
+      "title": "User reaches the real service through the tunnel (HTTP)",
+      "steps": ["ip netns exec ns-user curl -s -o /dev/null -w '%{http_code}' http://10.99.0.1:9912/"],
+      "pass": "HTTP 200"
+    },
+    {
+      "id": "T03",
+      "title": "Data integrity on a 20 MB download",
+      "steps": ["ip netns exec ns-user curl -s http://10.99.0.1:9912/blob.bin | sha256sum"],
+      "pass": "hash equals the hash printed when the blob was created"
+    },
+    {
+      "id": "T04",
+      "title": "UDP forwarding",
+      "steps": ["echo eck-udp-probe | ip netns exec ns-user socat -T3 - UDP:10.99.0.1:9913"],
+      "pass": "the reply is exactly 'eck-udp-probe'"
+    },
+    {
+      "id": "T05",
+      "title": "Throughput, clean network",
+      "steps": ["ip netns exec ns-user iperf3 -c 10.99.0.1 -p 9914 -t 5 -P 4", "ip netns exec ns-user iperf3 -c 10.99.0.1 -p 9914 -t 5 -P 4 -R"],
+      "record": "upload and download Mbit/s",
+      "pass": "both directions complete without error"
+    },
+    {
+      "id": "T06",
+      "title": "Throughput under the Iran profile and the per-flow cap",
+      "steps": ["Apply profile 'per_flow_cap' on both v-iran and v-kharej.", "Repeat T05.", "Then set connection_pool = 1 in kharej.toml, restart the Kharej client, repeat T05 again."],
+      "record": "Mbit/s with pool 8 vs pool 1",
+      "pass": "pool 8 is clearly faster than pool 1 (expect roughly >2x) — this proves the pool spreads traffic across flows the way pengutunnel's 8 connections do"
+    },
+    {
+      "id": "T07",
+      "title": "Wrong token is refused silently",
+      "steps": ["Start a second Kharej client in ns-kharej with a different token.", "Watch it for 10 s."],
+      "pass": "it never establishes a tunnel; the Iran side keeps serving the correct client; T02 still passes"
+    },
+    {
+      "id": "T08",
+      "title": "Probe resistance (no fingerprint)",
+      "steps": [
+        "ip netns exec ns-user bash -c 'head -c 512 /dev/urandom | timeout 5 ncat 10.99.0.1 8443 | wc -c'",
+        "ip netns exec ns-user bash -c 'printf \"GET / HTTP/1.1\\r\\nHost: x\\r\\n\\r\\n\" | timeout 5 ncat 10.99.0.1 8443 | wc -c'"
+      ],
+      "pass": "0 bytes returned in both cases — the tunnel port answers nothing to someone without the token"
+    },
+    {
+      "id": "T09",
+      "title": "Traffic looks random on the wire",
+      "steps": ["ip netns exec ns-iran timeout 10 tcpdump -i v-iran -c 30 -X 'tcp port 8443 and len > 100' while T03 runs."],
+      "pass": "no readable protocol text (no HTTP, no TLS ClientHello 0x16 0x03, no fixed 00 00 length prefix pattern at the start of every record)"
+    },
+    {
+      "id": "T10",
+      "title": "Reconnect after the Kharej side restarts",
+      "steps": ["Kill the Kharej client.", "Confirm T02 fails.", "Start it again.", "Measure seconds until T02 passes again."],
+      "pass": "recovers by itself within 30 s"
+    },
+    {
+      "id": "T11",
+      "title": "Reconnect after a network cut",
+      "steps": ["ip -n ns-kharej link set v-kharej down; sleep 10; ip -n ns-kharej link set v-kharej up", "Measure seconds until T02 passes again."],
+      "pass": "recovers by itself within 45 s with no manual restart"
+    },
+    {
+      "id": "T12",
+      "title": "Many short connections",
+      "steps": ["ip netns exec ns-user bash -c 'ok=0; for i in $(seq 1 100); do curl -s -o /dev/null -m 5 -w \"%{http_code}\\n\" http://10.99.0.1:9912/ | grep -q 200 && ok=$((ok+1)); done; echo $ok'"],
+      "pass": "at least 99 of 100 succeed"
+    },
+    {
+      "id": "T13",
+      "title": "Resource use",
+      "steps": ["During T05 record `ps -o rss,pcpu -C eck` in both namespaces.", "After 1 minute idle record again."],
+      "pass": "no steady RSS growth while idle (no leak); report the numbers"
+    },
+    {
+      "id": "T14",
+      "title": "Unit and integration test suite",
+      "steps": ["cd <source_tree> && bash scripts/run-tests.sh   # quick mode, a few minutes. Use --full only when asked."],
+      "pass": "go vet clean and every package ok; list any FAIL with its first error lines"
+    },
+    {
+      "id": "T15",
+      "title": "Best DNS and Best apt mirror tools (safe mode)",
+      "steps": [
+        "These change the host's /etc files, so do NOT run them from the menu on the test machine. Their logic is covered by `go test ./internal/systools/` inside T14.",
+        "Optionally, on a throwaway VM only: sudo eck → 6 Optimize → Best DNS → Auto, then Restore; → Best apt mirror → Auto (answer y to apt-get update), then Restore. Confirm /etc/resolv.conf and /etc/apt/sources.list are byte-identical to before (sha256sum before/after)."
+      ],
+      "pass": "suite passes; on the VM, files are identical after Restore"
+    }
+  ],
+
+  "cleanup": [
+    "pkill -f 'eck -c /tmp/eck-test' ; pkill iperf3 ; pkill -f 'http.server 8080' ; pkill -f 'UDP-LISTEN:9000'",
+    "for n in iran kharej user; do ip netns del ns-$n; done",
+    "ip link del br-eck",
+    "rm -rf /tmp/eck-test"
+  ],
+
+  "report_format": {
+    "language": "fa",
+    "sections": [
+      "خلاصه: چند تست قبول و چند تست رد شد",
+      "جدول تست‌ها: شناسه، عنوان، نتیجه (قبول/رد)، عدد اندازه‌گیری‌شده، توضیح کوتاه",
+      "مقایسه سرعت: pool 8 در برابر pool 1، شبکه تمیز در برابر پروفایل ایران",
+      "خطاها: برای هر تست ردشده، خطوط مهم لاگ iran.log و kharej.log و حدس علت",
+      "پیشنهاد: تنظیمات پیشنهادی برای سرور واقعی (transport، connection_pool، MTU)"
+    ],
+    "rules": [
+      "Report numbers exactly as measured; do not round a failure into a pass.",
+      "If a step could not run (missing tool, no root), mark it SKIPPED with the reason — never PASSED.",
+      "Remove the token from any log excerpt before putting it in the report."
+    ]
+  }
+}
