@@ -3,6 +3,16 @@
 All notable changes to ECK-Tunnel are documented here. Entries before v1.8.3
 are BackPack's, whose history ECK-Tunnel continues.
 
+## v1.8.5
+
+- Setup links now carry a reverse layer-3 tunnel correctly. A reverse Full IP
+  tunnel made on the Iran server produces a link that rebuilds on the kharej
+  server as the dialling side, with the private-network addresses swapped and
+  Iran's forwarded ports left on Iran. This is what makes one Iran server to
+  several kharej servers practical: create each tunnel on Iran (each takes the
+  next free 10.10.N.0/30 automatically), copy its link to that kharej server,
+  and no two collide.
+
 ## v1.8.4
 
 - Added: the Full IP tunnel (layer 3) setup can now build a reverse tunnel —

@@ -30,9 +30,15 @@ import (
 
 // NewDirectTunnel is a filled direct-tunnel form.
 type NewDirectTunnel struct {
-	// Side is "iran" or "kharej". Iran dials out and exposes the ports; kharej
-	// waits and holds the real service.
+	// Side is "iran" or "kharej". Iran exposes the ports and holds the .1
+	// tunnel address; who dials is Reverse, below.
 	Side string `json:"side"`
+
+	// Reverse swaps who dials. Off (the default) is the ordinary direct
+	// arrangement — Iran dials kharej — so it needs no inbound port on Iran.
+	// On, kharej dials Iran and Iran listens, for when only the Iran server can
+	// accept an inbound connection.
+	Reverse bool `json:"reverse"`
 
 	// Carrier is how the packets travel: "pck", "udp" or "spoof".
 	Carrier string `json:"carrier"`
@@ -350,13 +356,16 @@ func (n NewDirectTunnel) spec() (l3Spec, error) {
 		return l3Spec{}, fmt.Errorf("a token is required, and must match the other machine exactly")
 	}
 
-	// Iran reaches out; kharej waits. This is the whole of the direct/reverse
-	// difference at this layer.
+	// Who dials decides who needs the peer's address. By default Iran dials
+	// kharej (the "direct" arrangement); Reverse swaps it so kharej dials Iran
+	// and Iran listens, for when only the Iran server can accept an inbound
+	// connection. Mode is derived from Side and Reverse together, in l3Spec.
+	dials := (side == sideIran) != n.Reverse
 	addr := net.JoinHostPort("0.0.0.0", port)
-	if side == sideIran {
+	if dials {
 		host := strings.TrimSpace(n.PeerAddr)
 		if host == "" {
-			return l3Spec{}, fmt.Errorf("the kharej server's address is required on the Iran side")
+			return l3Spec{}, fmt.Errorf("the other server's address is required on the side that dials")
 		}
 		addr = net.JoinHostPort(host, port)
 	}
@@ -367,7 +376,7 @@ func (n NewDirectTunnel) spec() (l3Spec, error) {
 	}
 
 	spec := l3Spec{
-		Name: name, Side: side, Carrier: carrier,
+		Name: name, Side: side, Reverse: n.Reverse, Carrier: carrier,
 		// Always ECK-Tunnel's own GRE inside the Noise session. There is no
 		// choice here and the panel does not offer one; see askL3Encap's
 		// removal in the CLI wizard for why.
@@ -381,6 +390,8 @@ func (n NewDirectTunnel) spec() (l3Spec, error) {
 	}
 	findL3Preset(strings.ToLower(strings.TrimSpace(n.Preset))).apply(&spec)
 
+	// The Iran side exposes the forwarded ports whichever end dials — it is the
+	// entry point users connect to.
 	if side == sideIran {
 		spec.Ports = parsePorts(n.Ports)
 		if len(spec.Ports) == 0 {

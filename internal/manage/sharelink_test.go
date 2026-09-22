@@ -273,3 +273,78 @@ func TestASpoofLinkCarriesTheRealAddressEvenWithNoTuning(t *testing.T) {
 		t.Error("the setup form built from the mirror drops the address again")
 	}
 }
+
+// A reverse layer-3 link, made on the Iran side, must rebuild on the kharej
+// side as a tunnel that DIALS Iran — not one that waits. The Iran side holds
+// the .1 address and listens; the kharej side gets Iran's real address and the
+// swapped subnet, and is never handed the Iran side's forwarded ports.
+func TestMirroringAReverseL3LinkMakesKharejDial(t *testing.T) {
+	// As ShareLinkFor builds it on the Iran side of a reverse tunnel: Iran
+	// listens, so it holds .1, and Rev is set.
+	l := ShareLink{
+		Kind: "direct", From: "iran", Rev: true,
+		Tok: "a-real-looking-token-0123456789abcdef", Tr: "quic", Encap: "gre",
+		Port: "9000", Host: "203.0.113.9", // Iran's real address
+		Ports: "443, 8080=80", AcceptUDP: true,
+		LocalIP: "10.10.2.1/30", PeerIP: "10.10.2.2",
+	}
+	f := MirrorForPeer(l)
+
+	if f.Side != "kharej" {
+		t.Fatalf("a link From iran should be for kharej, got %q", f.Side)
+	}
+	if !f.Reverse {
+		t.Error("the reverse flag did not carry to the kharej form")
+	}
+	// The kharej side dials, so it must be given Iran's real address.
+	if f.ServerAddr != "203.0.113.9" {
+		t.Errorf("the dialling kharej side was not told where to reach Iran: %q", f.ServerAddr)
+	}
+	// Addresses swap: Iran's .1 becomes kharej's peer, Iran's .2 becomes
+	// kharej's local.
+	if f.LocalIP != "10.10.2.2" || f.PeerIP != "10.10.2.1" {
+		t.Errorf("tunnel addresses did not swap: local=%q peer=%q", f.LocalIP, f.PeerIP)
+	}
+	// The forwarded ports are Iran's; kharej is not handed them.
+	if f.Ports != "" {
+		t.Errorf("the kharej side was handed Iran's forwarded ports: %q", f.Ports)
+	}
+
+	// And the config it builds actually listens on Iran / dials on kharej.
+	spec, err := f.ToNewDirectTunnel().spec()
+	if err != nil {
+		t.Fatalf("building the kharej config: %v", err)
+	}
+	if spec.mode() != "dial" {
+		t.Errorf("the rebuilt kharej tunnel does not dial: mode=%q", spec.mode())
+	}
+}
+
+// The whole point for the multi-kharej case: two tunnels made on one Iran
+// server must not land on the same /30, and each link must carry its own.
+func TestReverseL3RoundTripPreservesReverseAndSubnet(t *testing.T) {
+	for _, sub := range []struct{ local, peer string }{
+		{"10.10.0.1/30", "10.10.0.2"},
+		{"10.10.1.1/30", "10.10.1.2"},
+	} {
+		l := ShareLink{
+			Kind: "direct", From: "iran", Rev: true, Tok: "tok", Tr: "quic",
+			Encap: "gre", Port: "9000", Host: "198.51.100.1", Ports: "443",
+			LocalIP: sub.local, PeerIP: sub.peer,
+		}
+		s, err := l.Encode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := DecodeShareLink(s)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !got.Rev {
+			t.Errorf("subnet %s: the reverse flag was lost in the link", sub.local)
+		}
+		if got.LocalIP != sub.local || got.PeerIP != sub.peer {
+			t.Errorf("subnet %s: addresses changed: local=%q peer=%q", sub.local, got.LocalIP, got.PeerIP)
+		}
+	}
+}

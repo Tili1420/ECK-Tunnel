@@ -52,6 +52,7 @@ func (f PeerForm) ToNewDirectTunnel() NewDirectTunnel {
 	}
 	return NewDirectTunnel{
 		Side:        side,
+		Reverse:     f.Reverse,
 		Carrier:     f.Carrier,
 		Name:        f.Name,
 		Token:       f.Token,

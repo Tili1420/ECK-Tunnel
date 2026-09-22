@@ -70,6 +70,13 @@ type ShareLink struct {
 	Port string `json:"p"`             // the tunnel port
 	Host string `json:"h,omitempty"`   // the producing side's real address
 
+	// Rev is set on a direct (layer-3) link whose tunnel is reversed: kharej
+	// dials Iran, so Iran is the side that listens. It decides which end is
+	// given the peer's real address to reach — the dialling side — rather than
+	// assuming that is always Iran. Absent (the default) means the ordinary
+	// direct arrangement, Iran dials kharej, so an older link keeps its meaning.
+	Rev bool `json:"rev,omitempty"`
+
 	Preset    string `json:"pr,omitempty"`
 	Ports     string `json:"po,omitempty"` // forwarded ports, as the Iran side has them
 	AcceptUDP bool   `json:"u,omitempty"`
@@ -219,6 +226,7 @@ type PeerForm struct {
 	Carrier    string `json:"carrier,omitempty"`    // direct
 	SNIDomain  string `json:"sniDomain,omitempty"`  // direct, sni carrier only
 	Encap      string `json:"encap,omitempty"`      // direct
+	Reverse    bool   `json:"reverse,omitempty"`    // direct: kharej dials Iran
 	ServerAddr string `json:"serverAddr,omitempty"` // the address this side dials
 	TunnelPort string `json:"tunnelPort,omitempty"`
 	Token      string `json:"token,omitempty"`
@@ -298,17 +306,24 @@ func MirrorForPeer(l ShareLink) PeerForm {
 		if l.Encap != "" {
 			paired = append(paired, "encap")
 		}
+		f.Reverse = l.Rev
 		// The private network's two addresses swap: the producer's local is the
 		// receiver's peer.
 		f.LocalIP, f.PeerIP = l.PeerIP, hostOf(l.LocalIP)
 		if f.LocalIP != "" {
 			paired = append(paired, "localIp", "peerIp")
 		}
-		// Iran dials kharej on a direct tunnel, so only the Iran side is asked
-		// for an address to reach.
-		if f.Side == "iran" {
+		// Only the dialling side is given an address to reach. That is Iran on
+		// an ordinary direct tunnel and kharej on a reversed one, so it is keyed
+		// on the direction rather than on which country this side is.
+		receiverDials := (f.Side == "iran") != l.Rev
+		if receiverDials {
 			f.ServerAddr = l.Host
 			paired = append(paired, "serverAddr")
+		}
+		// The Iran side exposes the forwarded ports either way — it is the entry
+		// point users reach, whichever end opened the connection.
+		if f.Side == "iran" {
 			f.Ports = l.Ports
 			f.AcceptUDP = l.AcceptUDP
 		}
@@ -420,10 +435,17 @@ func ShareLinkFor(name, host string) (string, error) {
 	switch {
 	case cfg.L3.Enabled():
 		l.Kind = "direct"
+		// From is simply which machine made the link, worked out from this
+		// side's own address plan: the Iran end always holds the .1 address.
+		// It is independent of who dials, which Rev carries separately.
 		l.From = "kharej"
-		if !strings.EqualFold(strings.TrimSpace(cfg.L3.Mode), "listen") {
-			l.From = "iran" // the dialling side of a direct tunnel is Iran
+		if strings.HasSuffix(hostOf(cfg.L3.LocalIP), ".1") {
+			l.From = "iran"
 		}
+		// A listening Iran side, or a dialling kharej side, is the reverse
+		// arrangement. Either end's config is enough to tell.
+		listens := strings.EqualFold(strings.TrimSpace(cfg.L3.Mode), "listen")
+		l.Rev = (l.From == "iran") == listens
 		l.Tok = cfg.L3.Token
 		l.Tr = orDefault(cfg.L3.Carrier, "udp")
 		l.SNI = cfg.L3.SNIDomain
