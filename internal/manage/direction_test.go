@@ -61,3 +61,49 @@ func TestDirectMeansIranDialsOut(t *testing.T) {
 		t.Error("a reverse client was not reported as dialling out")
 	}
 }
+
+// The layer-3 wizard can now build a reverse tunnel too: kharej dials Iran, so
+// Iran is the side that listens. Only who opens the connection changes — Iran
+// keeps its .1 tunnel address and still exposes ports. The mode each side
+// writes is computed from Side and Reverse together, so the two machines,
+// configured separately, cannot end up both dialling or both listening.
+func TestL3ReverseFlipsWhoDials(t *testing.T) {
+	base := func(side directSide, reverse bool, addr, local, peer string) string {
+		return l3Spec{Side: side, Reverse: reverse, Carrier: "quic", Encap: "gre",
+			Addr: addr, Token: "t", Iface: "bp0",
+			LocalIP: local, PeerIP: peer, MTU: 1371}.render()
+	}
+
+	// Reverse: kharej dials Iran's real address, Iran binds.
+	iran := base(sideIran, true, "0.0.0.0:9000", "10.10.0.1/30", "10.10.0.2")
+	kharej := base(sideKharej, true, "198.51.100.7:9000", "10.10.0.2/30", "10.10.0.1")
+
+	if !strings.Contains(iran, `mode         = "listen"`) {
+		t.Fatalf("reverse: the Iran side should listen:\n%s", iran)
+	}
+	if !strings.Contains(kharej, `mode         = "dial"`) {
+		t.Fatalf("reverse: the kharej side should dial:\n%s", kharej)
+	}
+	// Iran still keeps its .1 address — the direction changed, not the layout.
+	if !strings.Contains(iran, `local_ip     = "10.10.0.1/30"`) {
+		t.Fatalf("reverse: the Iran side lost its .1 address:\n%s", iran)
+	}
+
+	// All four combinations, stated once as a table so the mapping is checked
+	// whole rather than by two examples.
+	for _, c := range []struct {
+		side    directSide
+		reverse bool
+		want    string
+	}{
+		{sideIran, false, "dial"}, // direct: Iran dials
+		{sideKharej, false, "listen"},
+		{sideIran, true, "listen"}, // reverse: Iran listens
+		{sideKharej, true, "dial"},
+	} {
+		got := l3Spec{Side: c.side, Reverse: c.reverse}.mode()
+		if got != c.want {
+			t.Errorf("side=%v reverse=%v: mode=%q, want %q", c.side, c.reverse, got, c.want)
+		}
+	}
+}

@@ -147,8 +147,14 @@ func (s directSpec) render() string {
 
 // l3Spec is everything the wizard collected for an [l3] tunnel.
 type l3Spec struct {
-	Name    string
-	Side    directSide
+	Name string
+	Side directSide
+	// Reverse flips who dials. By default the Iran side dials the kharej side
+	// (the "direct" arrangement, which needs no inbound port on Iran). When
+	// Reverse is set the kharej side dials Iran instead, so Iran is the one
+	// that listens — the arrangement a reverse port tunnel uses, for when only
+	// the Iran server can accept an inbound connection.
+	Reverse bool
 	Carrier string
 	// SNIDomain is the server name the "sni" carrier announces. Ignored by
 	// every other carrier, and empty means the engine's default.
@@ -192,6 +198,19 @@ func (s l3Spec) defaultName() string {
 	return "l3-" + s.Side.String() + "-" + addrPort(s.Addr)
 }
 
+// mode is which side reaches out first. Iran dials by default (the "direct"
+// arrangement); Reverse swaps it so kharej dials and Iran listens. It is
+// computed from both so the two ends, set up separately, cannot disagree: each
+// machine works out its own mode from the same two answers.
+func (s l3Spec) mode() string {
+	iranDials := !s.Reverse
+	thisSideDials := (s.Side == sideIran) == iranDials
+	if thisSideDials {
+		return "dial"
+	}
+	return "listen"
+}
+
 func (s l3Spec) render() string {
 	var b strings.Builder
 
@@ -202,11 +221,7 @@ func (s l3Spec) render() string {
 	b.WriteString("# Needs root: it creates a TUN network interface.\n")
 	b.WriteString("\n[l3]\n")
 
-	mode := "dial"
-	if s.Side == sideKharej {
-		mode = "listen"
-	}
-	writeKV(&b, "mode", quote(mode))
+	writeKV(&b, "mode", quote(s.mode()))
 	writeKV(&b, "addr", quote(s.Addr))
 	writeKV(&b, "token", quote(s.Token))
 	writeKV(&b, "carrier", quote(s.Carrier))

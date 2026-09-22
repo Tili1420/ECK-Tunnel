@@ -110,6 +110,32 @@ func askSharedToken(side directSide) (string, bool) {
 
 // ---------------------------------------------------------------- layer 3
 
+// askL3Direction asks who reaches out first, and returns whether the tunnel is
+// reverse (kharej dials Iran). The default is "direct" — Iran dials — because
+// it needs no inbound port on the Iran server, which is the harder side to open
+// one on. Reverse is offered for the case that only the Iran server can accept
+// an inbound connection: then kharej dials it, exactly as a reverse port tunnel
+// does. Either way the Iran side keeps its tunnel address and can expose ports;
+// only who opens the connection changes.
+func askL3Direction() (reverse bool, ok bool) {
+	fmt.Println()
+	tui.Info("Which server opens the connection? The other one waits for it and")
+	tui.Info("needs that tunnel port open in its firewall.")
+	fmt.Println()
+	idx := tui.ChooseOpt("Who dials:", []tui.Option{
+		{Title: "Iran dials kharej", Desc: "the usual choice — the Iran server needs no inbound port"},
+		{Title: "Kharej dials Iran", Desc: "reverse — for when only the Iran server can accept a connection"},
+	})
+	switch idx {
+	case 0:
+		return false, true
+	case 1:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
 // setupL3 builds an [l3] tunnel: a private network between the two servers.
 func setupL3(side directSide) {
 	fmt.Println()
@@ -134,27 +160,38 @@ func setupL3(side directSide) {
 	const encap = "gre"
 	greKey := uint32(0)
 
-	cfg := l3Spec{Side: side, Carrier: carrier, Encap: encap, GREKey: greKey}
+	reverse, ok := askL3Direction()
+	if !ok {
+		return
+	}
+
+	cfg := l3Spec{Side: side, Reverse: reverse, Carrier: carrier, Encap: encap, GREKey: greKey}
 	// Chosen against what is already on the machine, so a second tunnel does
 	// not land on the first one's subnet. See freeL3Subnet.
 	suggestedLocal, suggestedPeer := freeL3Subnet(side)
+	cfg.LocalIP, cfg.PeerIP = suggestedLocal, suggestedPeer
 
-	// The Iran side dials out, which is the whole point of "direct".
-	if side == sideIran {
-		host := tui.Prompt("Kharej server address (IP or domain): ")
+	// Whoever dials needs the other machine's address; whoever listens only
+	// needs a port to bind. cfg.mode() already knows which this side is, so the
+	// questions follow from it rather than from geography.
+	if cfg.mode() == "dial" {
+		otherLabel, otherLower := "Kharej server", "kharej server"
+		if side == sideKharej {
+			otherLabel, otherLower = "Iran server", "Iran server"
+		}
+		host := tui.Prompt(otherLabel + " address (IP or domain): ")
 		if strings.TrimSpace(host) == "" {
 			tui.Error("An address is required.")
 			tui.PressEnter()
 			return
 		}
-		port := tui.PromptDefault("Tunnel port on the kharej server", "9000")
+		port := tui.PromptDefault("Tunnel port on the "+otherLower, "9000")
 		if !validPort(port) {
 			tui.Error("Invalid port.")
 			tui.PressEnter()
 			return
 		}
 		cfg.Addr = net.JoinHostPort(strings.TrimSpace(host), port)
-		cfg.LocalIP, cfg.PeerIP = suggestedLocal, suggestedPeer
 	} else {
 		port := tui.PromptDefault("Tunnel port to listen on", "9000")
 		if !validPort(port) {
@@ -163,7 +200,6 @@ func setupL3(side directSide) {
 			return
 		}
 		cfg.Addr = net.JoinHostPort("0.0.0.0", port)
-		cfg.LocalIP, cfg.PeerIP = suggestedLocal, suggestedPeer
 	}
 
 	fmt.Println()
@@ -220,14 +256,15 @@ func setupL3(side directSide) {
 	// explanation was written; the carrier is a direct one now, so the screen
 	// came with it. See askSpoofCarrier.
 	if carrier == "spoof" {
-		askSpoofCarrier(&cfg.Spoof, side == sideIran)
+		dials := cfg.mode() == "dial"
+		askSpoofCarrier(&cfg.Spoof, dials)
 		// Whatever the operator chose above, the listening side cannot work out
 		// where to answer: every packet it receives carries a forged source. The
 		// wizard asks for it, and the engine refuses to start without it, so it
 		// is worth not letting the setup finish without it either.
-		if side == sideKharej && net.ParseIP(cfg.Spoof.SpoofPeerIP) == nil {
+		if !dials && net.ParseIP(cfg.Spoof.SpoofPeerIP) == nil {
 			fmt.Println()
-			tui.Error("This side needs the Iran server's real IP — it cannot be learned")
+			tui.Error("This side needs the peer's real IP — it cannot be learned")
 			tui.Error("from the forged packets, and the tunnel will not start without it.")
 			tui.PressEnter()
 			return
@@ -235,9 +272,10 @@ func setupL3(side directSide) {
 		// The one piece of host setup the tunnel cannot do for itself: a strict
 		// reverse-path filter drops every forged-source packet before the tunnel
 		// sees it. The peer's real address tells us which interface receives, so
-		// the offer names the right one.
+		// the offer names the right one. The dialling side has the peer's real
+		// address in cfg.Addr; the listening side was given it above.
 		peerReal := cfg.Spoof.SpoofPeerIP
-		if side == sideIran {
+		if dials {
 			if host, _, err := net.SplitHostPort(cfg.Addr); err == nil {
 				peerReal = host
 			}
@@ -459,7 +497,7 @@ func summariseL3(cfg l3Spec) {
 		encap += fmt.Sprintf(" (key %d)", cfg.GREKey)
 	}
 	tui.Info("Wrapping    : " + encap)
-	if cfg.Side == sideIran {
+	if cfg.mode() == "dial" {
 		tui.Info("Dials       : " + cfg.Addr)
 	} else {
 		tui.Info("Listens on  : " + cfg.Addr)

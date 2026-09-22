@@ -3,6 +3,13 @@
 All notable changes to ECK-Tunnel are documented here. Entries before v1.8.3
 are BackPack's, whose history ECK-Tunnel continues.
 
+## v1.8.4
+
+- Added: the Full IP tunnel (layer 3) setup can now build a reverse tunnel —
+  kharej dials Iran, so Iran is the side that listens — for when only the Iran
+  server can accept an inbound connection. The wizard asks who dials; the two
+  ends compute their own mode from the same answer so they cannot disagree.
+
 ## v1.8.3
 
 - Fixed: creating a tunnel failed with `exec: "Systemctl": executable file not
