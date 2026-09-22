@@ -124,17 +124,82 @@ fetch() {
 # Checks the Ed25519 signature over SHA256SUMS against the key pinned below,
 # the same one the binary's updater pins (internal/app/app.go). The .sig file
 # is base64 of the raw 64-byte signature. Returns 0 on a valid signature,
-# 1 when it does not verify, 2 when openssl cannot check it.
+# 1 when it does not verify, 2 when nothing on this machine can check it.
+#
+# python3 does the checking: it is on every Ubuntu release, and the verifier
+# below is RFC 8032's reference code with no module beyond hashlib. openssl is
+# only the fallback — Ed25519 from its command line needs OpenSSL 3's -rawin,
+# and Ubuntu 20.04 ships 1.1.1, where that option does not exist.
 RELEASE_PUBKEY="gmO2GAoKSHtVyPlduUkOtlNmY1hq61OXJ2aVQCzqJS8="
 verify_signature() {
-  local sums="$1" sig="$2" tmp
-  command -v openssl >/dev/null 2>&1 || { warn "openssl not found — cannot check the release signature."; return 2; }
+  local sums="$1" sig="$2"
+  if command -v python3 >/dev/null 2>&1; then
+    python3 - "$sums" "$sig" "$RELEASE_PUBKEY" <<'PY'
+# Ed25519 verification, from RFC 8032 section 6.
+import base64, hashlib, sys
+p = 2**255 - 19
+q = 2**252 + 27742317777372353535851937790883648493
+def inv(x): return pow(x, p - 2, p)
+d = -121665 * inv(121666) % p
+sqrt_m1 = pow(2, (p - 1) // 4, p)
+def add(P, Q):
+    A, B = (P[1] - P[0]) * (Q[1] - Q[0]) % p, (P[1] + P[0]) * (Q[1] + Q[0]) % p
+    C, D = 2 * P[3] * Q[3] * d % p, 2 * P[2] * Q[2] % p
+    E, F, G, H = B - A, D - C, D + C, B + A
+    return (E * F, G * H, F * G, E * H)
+def mul(s, P):
+    Q = (0, 1, 1, 0)
+    while s > 0:
+        if s & 1: Q = add(Q, P)
+        P = add(P, P)
+        s >>= 1
+    return Q
+def equal(P, Q):
+    return (P[0] * Q[2] - Q[0] * P[2]) % p == 0 and (P[1] * Q[2] - Q[1] * P[2]) % p == 0
+def recover_x(y, sign):
+    if y >= p: return None
+    x2 = (y * y - 1) * inv(d * y * y + 1)
+    if x2 == 0: return None if sign else 0
+    x = pow(x2, (p + 3) // 8, p)
+    if (x * x - x2) % p != 0: x = x * sqrt_m1 % p
+    if (x * x - x2) % p != 0: return None
+    if (x & 1) != sign: x = p - x
+    return x
+def decompress(s):
+    if len(s) != 32: return None
+    y = int.from_bytes(s, "little")
+    sign = y >> 255
+    y &= (1 << 255) - 1
+    x = recover_x(y, sign)
+    return None if x is None else (x, y, 1, x * y % p)
+gy = 4 * inv(5) % p
+G = (recover_x(gy, 0), gy, 1, recover_x(gy, 0) * gy % p)
+def verify(pub, msg, sig):
+    if len(pub) != 32 or len(sig) != 64: return False
+    A, R = decompress(pub), decompress(sig[:32])
+    if A is None or R is None: return False
+    s = int.from_bytes(sig[32:], "little")
+    if s >= q: return False
+    h = int.from_bytes(hashlib.sha512(sig[:32] + pub + msg).digest(), "little") % q
+    return equal(mul(s, G), add(R, mul(h, A)))
+try:
+    msg = open(sys.argv[1], "rb").read()
+    sig = base64.b64decode("".join(open(sys.argv[2]).read().split()))
+    pub = base64.b64decode(sys.argv[3])
+except Exception:
+    sys.exit(1)
+sys.exit(0 if verify(pub, msg, sig) else 1)
+PY
+    return $?
+  fi
+  command -v openssl >/dev/null 2>&1 || { warn "Neither python3 nor openssl found — cannot check the release signature."; return 2; }
+  openssl pkeyutl -help 2>&1 | grep -q -- '-rawin' || { warn "This OpenSSL cannot check Ed25519 signatures and python3 is missing."; return 2; }
+  local tmp rc=1
   tmp="$(mktemp -d)" || return 2
   # An Ed25519 public key in SubjectPublicKeyInfo form is a fixed 12-byte
   # header followed by the raw 32-byte key.
   { printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00'; printf '%s' "$RELEASE_PUBKEY" | base64 -d; } > "$tmp/pub.der" 2>/dev/null
   tr -d '[:space:]' < "$sig" | base64 -d > "$tmp/sig.bin" 2>/dev/null
-  local rc=1
   if openssl pkey -pubin -inform DER -in "$tmp/pub.der" -out "$tmp/pub.pem" 2>/dev/null &&
      openssl pkeyutl -verify -pubin -inkey "$tmp/pub.pem" -rawin -in "$sums" -sigfile "$tmp/sig.bin" >/dev/null 2>&1; then
     rc=0

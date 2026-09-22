@@ -1,6 +1,16 @@
 # Changelog
 
-All notable changes to Backpack are documented here.
+All notable changes to ECK-Tunnel are documented here. Entries before v1.8.3
+are BackPack's, whose history ECK-Tunnel continues.
+
+## v1.8.3
+
+- Fixed: creating a tunnel failed with `exec: "Systemctl": executable file not
+  found` — the systemctl wrapper called the command with a capital S. Inherited
+  from BackPack; a test now rejects any capitalised command name.
+- Fixed: install.sh refused every release on Ubuntu 20.04. Its signature check
+  needed OpenSSL 3 (`-rawin`); it now verifies with a dependency-free python3
+  Ed25519 verifier and keeps OpenSSL 3 as the fallback.
 
 ## v1.8.2 — unreleased
 
